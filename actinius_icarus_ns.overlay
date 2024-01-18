@@ -1,0 +1,69 @@
+// To get started, press Ctrl+Space (or Option+Esc) to bring up the completion menu and view the available nodes.
+
+// You can also use the buttons in the sidebar to perform actions on nodes.
+// Actions currently available include:
+
+// * Enabling / disabling the node
+// * Adding the bus to a bus
+// * Removing the node
+// * Connecting ADC channels
+
+// For more help, browse the DeviceTree documentation at https://docs.zephyrproject.org/latest/guides/dts/index.html
+// You can also visit the nRF DeviceTree extension documentation at https://nrfconnect.github.io/vscode-nrf-connect/devicetree/nrfdevicetree.html
+
+/ {
+    buttons {
+		compatible = "gpio-keys";
+
+		button0: button_0 {
+			gpios = <&gpio0 5 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push Button 1";
+		};
+
+		pres1: pres_1 {
+			gpios = <&gpio0 1 (GPIO_PULL_DOWN | GPIO_ACTIVE_LOW)>;
+			label = "PresSensor1";
+		};
+		
+		pres2: pres_2 {
+			gpios = <&gpio0 2 (GPIO_PULL_DOWN | GPIO_ACTIVE_LOW)>;
+			label = "PresSensor1";
+		};	
+		
+		pir: pir_0 {
+			gpios = <&gpio0 4 (GPIO_PULL_DOWN | GPIO_ACTIVE_LOW)>;
+			label = "PirSensor";
+		};
+
+		pir2: pir_2 {
+			gpios = <&gpio0 0 (GPIO_PULL_DOWN | GPIO_ACTIVE_LOW)>;
+			label = "PirSensor2";
+		};		
+    };
+
+	switches {
+		compatible = "gpio-keys";
+
+		switch0: switch_0 {
+			gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+			label = "5V Switch";
+		};
+	};	
+
+    aliases {
+        sw1 = &switch0;
+		pres1 = &pres1;
+		pres2 = &pres2;
+		pir = &pir;
+		pir2 = &pir2;
+    };
+
+};       
+
+&i2c2 {  
+	tfluna: tfluna@10{
+		compatible = "i2c-device";
+		reg = < 0x10 >;
+		label = "tfluna";
+	};
+};	
