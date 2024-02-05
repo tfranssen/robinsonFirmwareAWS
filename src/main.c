@@ -27,7 +27,7 @@
 LOG_MODULE_REGISTER(robinson, CONFIG_LOG_DEFAULT_LEVEL);
 
 
-char versionNr[10] = "v1.8";
+char versionNr[10] = "v1.81";
 bool debug = false;
 int debounceTime = 500;       // in ms
 int sensorEnabledTime = 5000; // in ms
@@ -203,6 +203,11 @@ NRF_MODEM_LIB_ON_INIT(aws_iot_init_hook, on_modem_lib_init, NULL);
 /* Initialized to value different than success (0) */
 static int modem_lib_init_result = -1;
 
+static int signalInt = 0;
+static int fluxInt = 0;
+static int tempInt = 0;
+
+
 static int get_battery_voltage(uint16_t *battery_voltage)
 {
 	int err;
@@ -313,7 +318,9 @@ static int shadow_update(bool version_number_include) {
   err += json_add_number(reported_obj, "activeTime", activeTime);
   err += json_add_number(reported_obj, "tauTime", tauTime);      
   err += json_add_number(reported_obj, "plmn", plmnInt);
-  err += json_add_number(reported_obj, "signal", signalInt);        
+  err += json_add_number(reported_obj, "signal", signalInt);  
+  err += json_add_number(reported_obj, "flux", fluxInt);
+  err += json_add_number(reported_obj, "temp", tempInt);      
 
 #ifdef hasLidar
   err += json_add_number(reported_obj, "sensorEnabledTime", sensorEnabledTime);
@@ -375,7 +382,7 @@ static int shadow_update(bool version_number_include) {
   }
   
   modem_info_string_get(MODEM_INFO_RSRP, signalVal, sizeof(signalVal));
-  int signalInt = atoi(signalVal);  
+  signalInt = atoi(signalVal);  
 
   cJSON_FreeString(message);
 
@@ -671,7 +678,7 @@ void turn_switch_off(void) { gpio_pin_set_dt(&switch1, 0); }
 void turn_switch_on(void) { gpio_pin_set_dt(&switch1, 1); }
 
 void init_switch(void) {
-  gpio_pin_configure_dt(&switch1, GPIO_OUTPUT_INACTIVE);
+  gpio_pin_configure_dt(&switch1, GPIO_OUTPUT_LOW);
 }
 
 void checkLastPirEvent(struct k_work *work) {
@@ -1109,6 +1116,8 @@ void lidarThread(void) {
           dist = 800;
         }
 
+        fluxInt = flux;
+        tempInt = temp;
         lastDist = dist;
         uint32_t nowTime = k_uptime_get_32();
 
