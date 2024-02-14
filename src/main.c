@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <zephyr/device.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/drivers/adc.h>
