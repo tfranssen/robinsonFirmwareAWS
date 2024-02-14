@@ -1,5 +1,4 @@
-//#define hasTubes 1
-#define hasLidar 1
+
 
 #include <cJSON.h>
 #include <cJSON_os.h>
@@ -24,10 +23,19 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
 
+//Device specific defines
+#define hasTubes 1
+#define hasLidar 1
+#define oldPCB 1    //Old PCB has different ADC input
+
 LOG_MODULE_REGISTER(robinson, CONFIG_LOG_DEFAULT_LEVEL);
 
+<<<<<<< Updated upstream
 
 char versionNr[10] = "v1.81";
+=======
+char versionNr[10] = "v1.82";
+>>>>>>> Stashed changes
 bool debug = false;
 int debounceTime = 500;       // in ms
 int sensorEnabledTime = 5000; // in ms
@@ -151,7 +159,13 @@ static int pir2CountDelta = 0;
 #define ADC_REFERENCE ADC_REF_INTERNAL
 #define ADC_ACQUISITION_TIME ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10)
 #define ADC_1ST_CHANNEL_ID 0
-#define ADC_1ST_CHANNEL_INPUT SAADC_CH_PSELP_PSELP_AnalogInput0
+#ifdef oldPCB
+#define ADC_1ST_CHANNEL_INPUT SAADC_CH_PSELP_PSELP_AnalogInput3
+#endif
+
+#ifndef oldPCB
+#define ADC_1ST_CHANNEL_INPUT SAADC_CH_PSELP_PSELP_AnalogInput
+#endif
 
 #define BUFFER_SIZE 1
 static int16_t m_sample_buffer[BUFFER_SIZE];
@@ -284,6 +298,9 @@ static int shadow_update(bool version_number_include) {
     return err;
   }
 
+  uint32_t nowUptime = k_uptime_get_32();
+
+
   cJSON *root_obj = cJSON_CreateObject();
   cJSON *state_obj = cJSON_CreateObject();
   cJSON *reported_obj = cJSON_CreateObject();
@@ -311,7 +328,12 @@ static int shadow_update(bool version_number_include) {
   get_battery_voltage(&batteryVoltage);
   printk("Battery voltage: %u mV\n", batteryVoltage);
   err += json_add_number(reported_obj, "ts", message_ts);
+<<<<<<< Updated upstream
 
+=======
+  err += json_add_number(reported_obj, "uptime", nowUptime);
+  err += json_add_number(reported_obj, "debug", debug);
+>>>>>>> Stashed changes
   err += json_add_number(reported_obj, "batv", batteryVoltage);
   err += json_add_number(reported_obj, "5V", switchOn);
   err += json_add_number(reported_obj, "sendInterval", sendDelay);
@@ -1116,8 +1138,7 @@ void lidarThread(void) {
           dist = 800;
         }
 
-        fluxInt = flux;
-        tempInt = temp;
+        tempInt = floor(temp/100);
         lastDist = dist;
         uint32_t nowTime = k_uptime_get_32();
 
@@ -1126,6 +1147,7 @@ void lidarThread(void) {
           if (dist <= lowThreshold && dist > 5) {
             if (nowTime - lastPeopleCountTime >= lidarInterval) {
               numPeople++;
+              fluxInt = flux;
               numPeopleDelta++;
               printk("Person counted. Total count: %d. Distance: %d\n",
                      numPeople, dist);
@@ -1272,4 +1294,9 @@ void main(void) {
     printk("Requesting PSM failed, error: %d\n", err);
   }  
   k_work_schedule(&connect_work, K_NO_WAIT);
+<<<<<<< Updated upstream
 }
+=======
+  
+}
+>>>>>>> Stashed changes
