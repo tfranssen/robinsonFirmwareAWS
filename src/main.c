@@ -30,12 +30,7 @@
 
 LOG_MODULE_REGISTER(robinson, CONFIG_LOG_DEFAULT_LEVEL);
 
-<<<<<<< Updated upstream
-
-char versionNr[10] = "v1.81";
-=======
 char versionNr[10] = "v1.82";
->>>>>>> Stashed changes
 bool debug = false;
 int debounceTime = 500;       // in ms
 int sensorEnabledTime = 5000; // in ms
@@ -328,12 +323,9 @@ static int shadow_update(bool version_number_include) {
   get_battery_voltage(&batteryVoltage);
   printk("Battery voltage: %u mV\n", batteryVoltage);
   err += json_add_number(reported_obj, "ts", message_ts);
-<<<<<<< Updated upstream
 
-=======
   err += json_add_number(reported_obj, "uptime", nowUptime);
   err += json_add_number(reported_obj, "debug", debug);
->>>>>>> Stashed changes
   err += json_add_number(reported_obj, "batv", batteryVoltage);
   err += json_add_number(reported_obj, "5V", switchOn);
   err += json_add_number(reported_obj, "sendInterval", sendDelay);
@@ -1294,9 +1286,5 @@ void main(void) {
     printk("Requesting PSM failed, error: %d\n", err);
   }  
   k_work_schedule(&connect_work, K_NO_WAIT);
-<<<<<<< Updated upstream
 }
-=======
-  
-}
->>>>>>> Stashed changes
+
