@@ -1,5 +1,3 @@
-
-
 #include <cJSON.h>
 #include <cJSON_os.h>
 #include <date_time.h>
@@ -23,20 +21,21 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/pm/device.h>
 
-//Device specific defines
-#define hasTubes 1
+// Device specific defines
+// #define hasTubes 0
 #define hasLidar 1
-#define oldPCB 1    //Old PCB has different ADC input
+// #define oldPCB 1 // Old PCB has different ADC input
 
 LOG_MODULE_REGISTER(robinson, CONFIG_LOG_DEFAULT_LEVEL);
 
-char versionNr[10] = "v1.82";
+char versionNr[10] = "v1.9";
 bool debug = false;
 int debounceTime = 500;       // in ms
 int sensorEnabledTime = 5000; // in ms
-int abInterval = 1500;         // in ms
-int sendDelay = 1800;         // in seconds
+int abInterval = 1500;        // in ms
+int sendDelay = 1800;           // in seconds
 int lowThreshold = 350;       // in cm
 int highThreshold = 360;      // in cm
 int lidarInterval = 500;      // in ms
@@ -57,7 +56,13 @@ char signalVal[32] = {
     '\0',
 };
 
-void copyFirstChars(const char *source, char *destination, int n) {
+bool containsSubstring(const char *str, const char *substr)
+{
+  return strstr(str, substr) != NULL;
+}
+
+void copyFirstChars(const char *source, char *destination, int n)
+{
   strncpy(destination, source, n);
   destination[n] = '\0'; // Ensure null-termination of destination string
 }
@@ -94,14 +99,13 @@ static const struct device *gpio_dev;
 static struct gpio_callback gpio_cb1;
 static struct gpio_callback gpio_cb2;
 #endif
-static struct gpio_callback gpio_cb3; //Button callback
-static struct gpio_callback gpio_cb4; //Pir callback
-static struct gpio_callback gpio_cb5; //Pir2 callback
+static struct gpio_callback gpio_cb3; // Button callback
+static struct gpio_callback gpio_cb4; // Pir callback
+static struct gpio_callback gpio_cb5; // Pir2 callback
 
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static const struct gpio_dt_spec pir = GPIO_DT_SPEC_GET(PIR_NODE, gpios);
 static const struct gpio_dt_spec pir2 = GPIO_DT_SPEC_GET(PIR_NODE2, gpios);
-
 
 #ifdef hasLidar
 static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(I2C2_NODE);
@@ -117,14 +121,13 @@ static const struct gpio_dt_spec pres2Input =
 
 static struct k_work_delayable toggle5V_work;
 static struct k_work_delayable toggleInterrupt_work;
+static struct k_work_delayable disconnectAWS_work;
 
 #ifdef hasTubes
 static struct k_work_delayable pres1_work;
 static struct k_work_delayable pres2_work;
 #endif
 static struct k_work_delayable checkLastPirEvent_work;
-
-
 
 #ifdef hasLidar
 // Lidar settings
@@ -144,10 +147,10 @@ static int pir2Count = 0;
 static int pir2CountDelta = 0;
 #endif
 
-#define BATVOLT_R1 4.7f                 // MOhm
-#define BATVOLT_R2 10.0f                // MOhm
-#define INPUT_VOLT_RANGE 3.6f           // Volts
-#define VALUE_RANGE_10_BIT 1.023        // (2^10 - 1) / 1000
+#define BATVOLT_R1 4.7f          // MOhm
+#define BATVOLT_R2 10.0f         // MOhm
+#define INPUT_VOLT_RANGE 3.6f    // Volts
+#define VALUE_RANGE_10_BIT 1.023 // (2^10 - 1) / 1000
 
 #define ADC_NODE DT_NODELABEL(adc)
 #define ADC_RESOLUTION 10
@@ -160,8 +163,43 @@ static int pir2CountDelta = 0;
 #endif
 
 #ifndef oldPCB
-#define ADC_1ST_CHANNEL_INPUT SAADC_CH_PSELP_PSELP_AnalogInput
+#define ADC_1ST_CHANNEL_INPUT SAADC_CH_PSELP_PSELP_AnalogInput0
 #endif
+
+bool uart = 1;
+
+void icarus_uart_set_enable(bool enable)
+{
+  int err;
+  const struct device *uart0_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
+  const struct device *uart1_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
+
+  if (device_is_ready(uart0_dev))
+  {
+    err = pm_device_action_run(uart0_dev, enable ? PM_DEVICE_ACTION_RESUME : PM_DEVICE_ACTION_SUSPEND);
+    if (err)
+    {
+      printk("UART0 device action failed: %d\n", err);
+    }
+    else
+    {
+      printk("UART0 device action success\n");
+    }
+  }
+
+  if (device_is_ready(uart1_dev))
+  {
+    err = pm_device_action_run(uart1_dev, enable ? PM_DEVICE_ACTION_RESUME : PM_DEVICE_ACTION_SUSPEND);
+    if (err)
+    {
+      printk("UART1 device action failed: %d\n", err);
+    }
+    else
+    {
+      printk("UART1 device action success\n");
+    }
+  }
+}
 
 #define BUFFER_SIZE 1
 static int16_t m_sample_buffer[BUFFER_SIZE];
@@ -169,11 +207,11 @@ static int16_t m_sample_buffer[BUFFER_SIZE];
 static const struct device *adc_dev;
 
 static const struct adc_channel_cfg m_1st_channel_cfg = {
-	.gain = ADC_GAIN,
-	.reference = ADC_REFERENCE,
-	.acquisition_time = ADC_ACQUISITION_TIME,
-	.channel_id = ADC_1ST_CHANNEL_ID,
-	.input_positive   = ADC_1ST_CHANNEL_INPUT,
+    .gain = ADC_GAIN,
+    .reference = ADC_REFERENCE,
+    .acquisition_time = ADC_ACQUISITION_TIME,
+    .channel_id = ADC_1ST_CHANNEL_ID,
+    .input_positive = ADC_1ST_CHANNEL_INPUT,
 };
 
 uint32_t last_button_press_time;
@@ -217,91 +255,101 @@ static int signalInt = 0;
 static int fluxInt = 0;
 static int tempInt = 0;
 
-
 static int get_battery_voltage(uint16_t *battery_voltage)
 {
-	int err;
+  int err;
 
-	const struct adc_sequence sequence = {
-		.channels = BIT(ADC_1ST_CHANNEL_ID),
-		.buffer = m_sample_buffer,
-		.buffer_size = sizeof(m_sample_buffer), // in bytes!
-		.resolution = ADC_RESOLUTION,
-	};
+  const struct adc_sequence sequence = {
+      .channels = BIT(ADC_1ST_CHANNEL_ID),
+      .buffer = m_sample_buffer,
+      .buffer_size = sizeof(m_sample_buffer), // in bytes!
+      .resolution = ADC_RESOLUTION,
+  };
 
-	if (!adc_dev) {
-		return -1;
-	}
+  if (!adc_dev)
+  {
+    return -1;
+  }
 
-	err = adc_read(adc_dev, &sequence);
-	if (err) {
-		printk("ADC read err: %d\n", err);
+  err = adc_read(adc_dev, &sequence);
+  if (err)
+  {
+    printk("ADC read err: %d\n", err);
 
-		return err;
-	}
+    return err;
+  }
 
-	float sample_value = 0;
-	for (int i = 0; i < BUFFER_SIZE; i++) {
-		sample_value += (float) m_sample_buffer[i];
-	}
-	sample_value /= BUFFER_SIZE;
+  float sample_value = 0;
+  for (int i = 0; i < BUFFER_SIZE; i++)
+  {
+    sample_value += (float)m_sample_buffer[i];
+  }
+  sample_value /= BUFFER_SIZE;
 
-	*battery_voltage = (uint16_t)(sample_value * (INPUT_VOLT_RANGE / VALUE_RANGE_10_BIT) * ((BATVOLT_R1 + BATVOLT_R2) / BATVOLT_R2));
+  *battery_voltage = (uint16_t)(sample_value * (INPUT_VOLT_RANGE / VALUE_RANGE_10_BIT) * ((BATVOLT_R1 + BATVOLT_R2) / BATVOLT_R2));
 
-	return 0;
+  return 0;
 }
 
-static void on_modem_lib_init(int ret, void *ctx) {
+static void on_modem_lib_init(int ret, void *ctx)
+{
   modem_lib_init_result = ret;
 }
 
-static int json_add_obj(cJSON *parent, const char *str, cJSON *item) {
+static int json_add_obj(cJSON *parent, const char *str, cJSON *item)
+{
   cJSON_AddItemToObject(parent, str, item);
 
   return 0;
 }
 
-static int json_add_str(cJSON *parent, const char *str, const char *item) {
+static int json_add_str(cJSON *parent, const char *str, const char *item)
+{
   cJSON *json_str;
 
   json_str = cJSON_CreateString(item);
-  if (json_str == NULL) {
+  if (json_str == NULL)
+  {
     return -ENOMEM;
   }
 
   return json_add_obj(parent, str, json_str);
 }
 
-static int json_add_number(cJSON *parent, const char *str, double item) {
+static int json_add_number(cJSON *parent, const char *str, double item)
+{
   cJSON *json_num;
 
   json_num = cJSON_CreateNumber(item);
-  if (json_num == NULL) {
+  if (json_num == NULL)
+  {
     return -ENOMEM;
   }
 
   return json_add_obj(parent, str, json_num);
 }
 
-static int shadow_update(bool version_number_include) {
+static int shadow_update(bool version_number_include)
+{
   int err;
   char *message;
   int64_t message_ts = 0;
 
   err = date_time_now(&message_ts);
-  if (err) {
+  if (err)
+  {
     printk("date_time_now, error: %d\n", err);
     return err;
   }
 
   uint32_t nowUptime = k_uptime_get_32();
 
-
   cJSON *root_obj = cJSON_CreateObject();
   cJSON *state_obj = cJSON_CreateObject();
   cJSON *reported_obj = cJSON_CreateObject();
 
-  if (root_obj == NULL || state_obj == NULL || reported_obj == NULL) {
+  if (root_obj == NULL || state_obj == NULL || reported_obj == NULL)
+  {
     cJSON_Delete(root_obj);
     cJSON_Delete(state_obj);
     cJSON_Delete(reported_obj);
@@ -309,16 +357,17 @@ static int shadow_update(bool version_number_include) {
     return err;
   }
 
-  if (version_number_include) {
+  if (version_number_include)
+  {
     err = json_add_str(reported_obj, "app_version", versionNr);
-  } else {
+  }
+  else
+  {
     err = 0;
   }
 
   modem_info_string_get(MODEM_INFO_OPERATOR, plmn, sizeof(plmn));
   int plmnInt = atoi(plmn);
-
-
 
   uint16_t batteryVoltage = 0;
   get_battery_voltage(&batteryVoltage);
@@ -331,18 +380,19 @@ static int shadow_update(bool version_number_include) {
   err += json_add_number(reported_obj, "5V", switchOn);
   err += json_add_number(reported_obj, "sendInterval", sendDelay);
   err += json_add_number(reported_obj, "activeTime", activeTime);
-  err += json_add_number(reported_obj, "tauTime", tauTime);      
+  err += json_add_number(reported_obj, "tauTime", tauTime);
   err += json_add_number(reported_obj, "plmn", plmnInt);
-  err += json_add_number(reported_obj, "signal", signalInt);  
+  err += json_add_number(reported_obj, "signal", signalInt);
   err += json_add_number(reported_obj, "flux", fluxInt);
-  err += json_add_number(reported_obj, "temp", tempInt);      
+  err += json_add_number(reported_obj, "temp", tempInt);
+  err += json_add_number(reported_obj, "uart", uart);
 
 #ifdef hasLidar
   err += json_add_number(reported_obj, "sensorEnabledTime", sensorEnabledTime);
   err += json_add_number(reported_obj, "lowLidarThreshold", lowThreshold);
   err += json_add_number(reported_obj, "highLidarThreshold", highThreshold);
   err += json_add_number(reported_obj, "lidarInterval", lidarInterval);
-  err += json_add_number(reported_obj, "lastDist", lastDist);  
+  err += json_add_number(reported_obj, "lastDist", lastDist);
   err += json_add_number(reported_obj, "lidarCount", numPeople);
   err += json_add_number(reported_obj, "lidarCountDelta", numPeopleDelta);
   err += json_add_number(reported_obj, "pir1Count", pir1Count);
@@ -351,11 +401,11 @@ static int shadow_update(bool version_number_include) {
   err += json_add_number(reported_obj, "pir2CountDelta", pir2CountDelta);
   pir1CountDelta = 0;
   pir2CountDelta = 0;
-  numPeopleDelta = 0;  
+  numPeopleDelta = 0;
 #endif
 #ifdef hasTubes
   err += json_add_number(reported_obj, "debounceTime", debounceTime);
-  err += json_add_number(reported_obj, "aBInterval", abInterval);  
+  err += json_add_number(reported_obj, "aBInterval", abInterval);
   err += json_add_number(reported_obj, "pres1Count", pres1Count);
   err += json_add_number(reported_obj, "pres2Count", pres2Count);
   err += json_add_number(reported_obj, "aToBcount", aToBcount);
@@ -372,13 +422,15 @@ static int shadow_update(bool version_number_include) {
   err += json_add_obj(state_obj, "reported", reported_obj);
   err += json_add_obj(root_obj, "state", state_obj);
 
-  if (err) {
+  if (err)
+  {
     printk("json_add, error: %d\n", err);
     goto cleanup;
   }
 
   message = cJSON_Print(root_obj);
-  if (message == NULL) {
+  if (message == NULL)
+  {
     printk("cJSON_Print, error: returned NULL\n");
     err = -ENOMEM;
     goto cleanup;
@@ -392,12 +444,13 @@ static int shadow_update(bool version_number_include) {
   printk("Publishing: %s to AWS IoT broker\n", message);
 
   err = aws_iot_send(&tx_data);
-  if (err) {
+  if (err)
+  {
     printk("aws_iot_send, error: %d\n", err);
   }
-  
+
   modem_info_string_get(MODEM_INFO_RSRP, signalVal, sizeof(signalVal));
-  signalInt = atoi(signalVal);  
+  signalInt = atoi(signalVal);
 
   cJSON_FreeString(message);
 
@@ -408,15 +461,18 @@ cleanup:
   return err;
 }
 
-static void connect_work_fn(struct k_work *work) {
+static void connect_work_fn(struct k_work *work)
+{
   int err;
 
-  if (cloud_connected) {
+  if (cloud_connected)
+  {
     return;
   }
 
   err = aws_iot_connect(NULL);
-  if (err) {
+  if (err)
+  {
     printk("aws_iot_connect, error: %d\n", err);
   }
 
@@ -427,34 +483,51 @@ static void connect_work_fn(struct k_work *work) {
                   K_SECONDS(CONFIG_CONNECTION_RETRY_TIMEOUT_SECONDS));
 }
 
-static void shadow_update_work_fn(struct k_work *work) {
+static void shadow_update_work_fn(struct k_work *work)
+{
   int err;
+  if (!cloud_connected)
+  {
+    err = aws_iot_connect(NULL);
+    if (err)
+    {
+      printk("aws_iot_connect, error: %d\n", err);
+    }
+  }
 
-  if (!cloud_connected) {
+  if (!cloud_connected)
+  {
     return;
   }
 
   err = shadow_update(false);
-  if (err) {
+  if (err)
+  {
     printk("shadow_update, error: %d\n", err);
   }
 
   printk("Next data publication in %d seconds\n", sendDelay);
 
   k_work_schedule(&shadow_update_work, K_SECONDS(sendDelay));
+  k_work_schedule(&disconnectAWS_work, K_SECONDS(10));
 }
 
-static void shadow_update_version_work_fn(struct k_work *work) {
+static void shadow_update_version_work_fn(struct k_work *work)
+{
   int err;
 
   err = shadow_update(true);
-  if (err) {
+  if (err)
+  {
     printk("shadow_update, error: %d\n", err);
   }
+  k_work_schedule(&disconnectAWS_work, K_SECONDS(10));
 }
 static void print_received_data(const char *buf, const char *topic,
-                                size_t topic_len) {
+                                size_t topic_len)
+{
   char *str = NULL;
+
   cJSON *root_obj = NULL;
 
   char topicNew[topic_len + 1];
@@ -471,13 +544,15 @@ static void print_received_data(const char *buf, const char *topic,
   printk("Result is %d\n", result);
 
   root_obj = cJSON_Parse(buf);
-  if (root_obj == NULL) {
+  if (root_obj == NULL)
+  {
     printk("cJSON Parse failure\n");
     return;
   }
 
   str = cJSON_Print(root_obj);
-  if (str == NULL) {
+  if (str == NULL)
+  {
     printk("Failed to print JSON object\n");
     goto clean_exit;
   }
@@ -485,73 +560,114 @@ static void print_received_data(const char *buf, const char *topic,
   printk("Data received from AWS IoT console:\nTopic: %.*s\nMessage: %s\n",
          topic_len, topic, str);
 
-  if (result == 0) {
-    cJSON *sendIntervalJSON = cJSON_GetObjectItem(root_obj, "sendInterval");
-    if (cJSON_IsNumber(sendIntervalJSON) && sendIntervalJSON->valueint > 0) {
+  if (containsSubstring(topicNew, "/shadow/update/delta"))
+  {
+    printk("Delta update received\n");
+
+    cJSON *state = cJSON_GetObjectItem(root_obj, "state");
+    if (state == NULL)
+    {
+      printk("Failed to get 'state' object\n");
+      return;
+    }
+
+    cJSON *sendIntervalJSON = cJSON_GetObjectItem(state, "sendInterval");
+    if (cJSON_IsNumber(sendIntervalJSON) && sendIntervalJSON->valueint > 0)
+    {
       sendDelay = sendIntervalJSON->valueint;
       printk("sendInterval changed.\n");
       changedSetting = true;
     }
 
-    cJSON *debounceTimeJSON = cJSON_GetObjectItem(root_obj, "debounceTime");
-    if (cJSON_IsNumber(debounceTimeJSON) && debounceTimeJSON->valueint > 0) {
+    cJSON *uartJSON = cJSON_GetObjectItem(state, "uart");
+    if (cJSON_IsNumber(uartJSON))
+    {
+      if (uartJSON->valueint == 1)
+      {
+        icarus_uart_set_enable(true);
+        uart = 1;
+      }
+      else
+      {
+        icarus_uart_set_enable(false);
+        uart = 0;
+      }
+      printk("uart changed.\n");
+      changedSetting = true;
+    }
+
+    cJSON *debounceTimeJSON = cJSON_GetObjectItem(state, "debounceTime");
+    if (cJSON_IsNumber(debounceTimeJSON) && debounceTimeJSON->valueint > 0)
+    {
       debounceTime = debounceTimeJSON->valueint;
       printk("debounceTime changed.\n");
       changedSetting = true;
     }
 
     cJSON *sensorEnabledTimeJSON =
-        cJSON_GetObjectItem(root_obj, "sensorEnabledTime");
+        cJSON_GetObjectItem(state, "sensorEnabledTime");
     if (cJSON_IsNumber(sensorEnabledTimeJSON) &&
-        sensorEnabledTimeJSON->valueint > 0) {
+        sensorEnabledTimeJSON->valueint > 0)
+    {
       sensorEnabledTime = sensorEnabledTimeJSON->valueint;
       printk("sensorEnabledTime changed.\n");
       changedSetting = true;
     }
 
-    cJSON *abIntervalJSON = cJSON_GetObjectItem(root_obj, "abInterval");
-    if (cJSON_IsNumber(abIntervalJSON) && abIntervalJSON->valueint > 0) {
+    cJSON *abIntervalJSON = cJSON_GetObjectItem(state, "abInterval");
+    if (cJSON_IsNumber(abIntervalJSON) && abIntervalJSON->valueint > 0)
+    {
       abInterval = abIntervalJSON->valueint;
       printk("abInterval changed.\n");
       changedSetting = true;
     }
 
-    cJSON *lowThresholdJSON = cJSON_GetObjectItem(root_obj, "lowThreshold");
-    if (cJSON_IsNumber(lowThresholdJSON) && lowThresholdJSON->valueint > 0) {
+    cJSON *lowThresholdJSON = cJSON_GetObjectItem(state, "lowThreshold");
+    if (cJSON_IsNumber(lowThresholdJSON) && lowThresholdJSON->valueint > 0)
+    {
       lowThreshold = lowThresholdJSON->valueint;
       printk("lowThreshold changed.\n");
       changedSetting = true;
     }
 
-    cJSON *highThresholdJSON = cJSON_GetObjectItem(root_obj,
-    "highThreshold"); if (cJSON_IsNumber(highThresholdJSON) &&
-    highThresholdJSON->valueint > 0) {
+    cJSON *highThresholdJSON = cJSON_GetObjectItem(state,
+                                                   "highThreshold");
+    if (cJSON_IsNumber(highThresholdJSON) &&
+        highThresholdJSON->valueint > 0)
+    {
       highThreshold = highThresholdJSON->valueint;
       printk("highThreshold changed.\n");
       changedSetting = true;
     }
 
-    cJSON *lidarIntervalJSON = cJSON_GetObjectItem(root_obj,
-    "lidarInterval"); if (cJSON_IsNumber(lidarIntervalJSON) &&
-    lidarIntervalJSON->valueint > 0) {
+    cJSON *lidarIntervalJSON = cJSON_GetObjectItem(state,
+                                                   "lidarInterval");
+    if (cJSON_IsNumber(lidarIntervalJSON) &&
+        lidarIntervalJSON->valueint > 0)
+    {
       lidarInterval = lidarIntervalJSON->valueint;
       printk("lidarInterval changed.\n");
       changedSetting = true;
     }
 
-    cJSON *debugJSON = cJSON_GetObjectItem(root_obj,
-    "debug"); 
-    if (cJSON_IsNumber(debugJSON)) {
-      if (debugJSON->valueint == 1) {
+    cJSON *debugJSON = cJSON_GetObjectItem(state,
+                                           "debug");
+    if (cJSON_IsNumber(debugJSON))
+    {
+      if (debugJSON->valueint == 1)
+      {
         debug = true;
-      } else {
+      }
+      else
+      {
         debug = false;
       }
       changedSetting = true;
     }
   }
 
-  if (changedSetting) {
+  if (changedSetting)
+  {
     k_work_cancel_delayable(&shadow_update_work);
     k_work_schedule(&shadow_update_work, K_SECONDS(2));
   }
@@ -562,8 +678,10 @@ clean_exit:
   cJSON_Delete(root_obj);
 }
 
-void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
-  switch (evt->type) {
+void aws_iot_event_handler(const struct aws_iot_evt *const evt)
+{
+  switch (evt->type)
+  {
   case AWS_IOT_EVT_CONNECTING:
     printk("AWS_IOT_EVT_CONNECTING\n");
     break;
@@ -578,7 +696,8 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
      */
     (void)k_work_cancel_delayable(&connect_work);
 
-    if (evt->data.persistent_session) {
+    if (evt->data.persistent_session)
+    {
       printk("Persistent session enabled\n");
     }
     boot_write_img_confirmed();
@@ -586,7 +705,8 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
     k_work_schedule(&shadow_update_work, K_SECONDS(sendDelay));
 
     int err = lte_lc_psm_req(true);
-    if (err) {
+    if (err)
+    {
       printk("Requesting PSM failed, error: %d\n", err);
     }
     break;
@@ -601,8 +721,8 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
      * it will exit after checking the above flag and the work will
      * not be scheduled again.
      */
-    (void)k_work_cancel_delayable(&shadow_update_work);
-    k_work_schedule(&connect_work, K_NO_WAIT);
+    // (void)k_work_cancel_delayable(&shadow_update_work);
+    // k_work_schedule(&connect_work, K_NO_WAIT);
     break;
   case AWS_IOT_EVT_DATA_RECEIVED:
     printk("AWS_IOT_EVT_DATA_RECEIVED\n");
@@ -615,12 +735,14 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
     break;
   case AWS_IOT_EVT_FOTA_START:
     printk("AWS_IOT_EVT_FOTA_START\n");
+    k_work_cancel_delayable(&disconnectAWS_work);
     break;
   case AWS_IOT_EVT_FOTA_ERASE_PENDING:
     printk("AWS_IOT_EVT_FOTA_ERASE_PENDING\n");
     printk("Disconnect LTE link or reboot\n");
     err = lte_lc_offline();
-    if (err) {
+    if (err)
+    {
       printk("Error disconnecting from LTE\n");
     }
     break;
@@ -628,7 +750,8 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
     printk("AWS_FOTA_EVT_ERASE_DONE\n");
     printk("Reconnecting the LTE link");
     err = lte_lc_connect();
-    if (err) {
+    if (err)
+    {
       printk("Error connecting to LTE\n");
     }
     break;
@@ -653,35 +776,44 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt) {
 }
 
 #ifdef hasTubes
-void pres1Work(struct k_work *work) {
+void pres1Work(struct k_work *work)
+{
 
   pres1Count++;
   pres1CountDelta++;
-  printk("Pres 1 active. Count is %d\r\n", pres1Count);
+  if (debug)
+  {
+    printk("Pres 1 active. Count is %d\r\n", pres1Count);
+  }
 
-  if (last_pres1_time - last_pres2_time < abInterval) {
+  if (last_pres1_time - last_pres2_time < abInterval)
+  {
     aToBcount++;
     aToBcountDelta++;
     printk("A->B: %d\r\n", aToBcount);
   }
 
-  if (debug == true) {
+  if (debug == true)
+  {
     printk("Sending debug info\n");
     k_work_submit(&shadow_update_version_work);
   }
 }
 
-void pres2Work(struct k_work *work) {
+void pres2Work(struct k_work *work)
+{
   pres2Count++;
   pres2CountDelta++;
   printk("Pres 2 active. Count is %d\r\n", pres2Count);
 
-  if (last_pres2_time - last_pres1_time < abInterval) {
+  if (last_pres2_time - last_pres1_time < abInterval)
+  {
     bToAcount++;
     bToAcountDelta++;
     printk("B->A: %d\r\n", bToAcount);
   }
-  if (debug == true) {
+  if (debug == true)
+  {
     printk("Sending debug info\n");
     k_work_submit(&shadow_update_version_work);
   }
@@ -692,30 +824,35 @@ void turn_switch_off(void) { gpio_pin_set_dt(&switch1, 0); }
 
 void turn_switch_on(void) { gpio_pin_set_dt(&switch1, 1); }
 
-void init_switch(void) {
+void init_switch(void)
+{
   gpio_pin_configure_dt(&switch1, GPIO_OUTPUT_LOW);
 }
 
-void checkLastPirEvent(struct k_work *work) {
+void checkLastPirEvent(struct k_work *work)
+{
   uint32_t nowTime = k_uptime_get_32();
-  if (nowTime - last_button_press_time >= sensorEnabledTime) {
+  if (nowTime - last_button_press_time >= sensorEnabledTime)
+  {
     k_work_schedule(&toggleInterrupt_work, K_NO_WAIT);
     k_work_schedule(&toggle5V_work, K_MSEC(500));
-  } else {
+  }
+  else
+  {
     // Check again if time has passed
     k_work_schedule(&checkLastPirEvent_work, K_MSEC(5000));
   }
 }
 
-
-
 #ifdef hasTubes
 void pres1_callback(const struct device *gpiob, struct gpio_callback *cb,
-                    gpio_port_pins_t pins) {
+                    gpio_port_pins_t pins)
+{
   uint32_t newPressTime = k_uptime_get_32();
 
   // debounce
-  if (k_uptime_get_32() - last_pres1_time < debounceTime) {
+  if (k_uptime_get_32() - last_pres1_time < debounceTime)
+  {
     return;
   }
 
@@ -725,11 +862,13 @@ void pres1_callback(const struct device *gpiob, struct gpio_callback *cb,
 }
 
 void pres2_callback(const struct device *gpiob, struct gpio_callback *cb,
-                    gpio_port_pins_t pins) {
+                    gpio_port_pins_t pins)
+{
   uint32_t newPressTime = k_uptime_get_32();
 
   // debounce
-  if (k_uptime_get_32() - last_pres2_time < debounceTime) {
+  if (k_uptime_get_32() - last_pres2_time < debounceTime)
+  {
     return;
   }
 
@@ -740,16 +879,19 @@ void pres2_callback(const struct device *gpiob, struct gpio_callback *cb,
 #endif
 
 void button_callback(const struct device *gpiob, struct gpio_callback *cb,
-                     gpio_port_pins_t pins) {
+                     gpio_port_pins_t pins)
+{
   uint32_t newPressTime = k_uptime_get_32();
 
   // debounce
-  if (k_uptime_get_32() - last_button_press_time < debounceTime) {
+  if (k_uptime_get_32() - last_button_press_time < debounceTime)
+  {
     return;
   }
   last_button_press_time = newPressTime;
 
-  if (!switchOn) {
+  if (!switchOn)
+  {
     k_work_schedule(&toggle5V_work, K_NO_WAIT);
     k_work_schedule(&toggleInterrupt_work, K_MSEC(100));
     k_work_schedule(&checkLastPirEvent_work, K_MSEC(sensorEnabledTime));
@@ -757,20 +899,22 @@ void button_callback(const struct device *gpiob, struct gpio_callback *cb,
 }
 
 void pir_callback(const struct device *gpiob, struct gpio_callback *cb,
-                  gpio_port_pins_t pins) {
+                  gpio_port_pins_t pins)
+{
   uint32_t newPressTime = k_uptime_get_32();
 
   // debounce
-  if (k_uptime_get_32() - last_button_press_time < debounceTime) {
+  if (k_uptime_get_32() - last_button_press_time < debounceTime)
+  {
     return;
   }
   last_button_press_time = newPressTime;
 
-
-  if (!switchOn) {
+  if (!switchOn)
+  {
     printk("Pir 1 motion\r\n");
     pir1Count++;
-    pir1CountDelta++;    
+    pir1CountDelta++;
     k_work_schedule(&toggle5V_work, K_NO_WAIT);
     k_work_schedule(&toggleInterrupt_work, K_MSEC(100));
     k_work_schedule(&checkLastPirEvent_work, K_MSEC(sensorEnabledTime));
@@ -778,31 +922,35 @@ void pir_callback(const struct device *gpiob, struct gpio_callback *cb,
 }
 
 void pir2_callback(const struct device *gpiob, struct gpio_callback *cb,
-                  gpio_port_pins_t pins) {
+                   gpio_port_pins_t pins)
+{
   uint32_t newPressTime = k_uptime_get_32();
 
   // debounce
-  if (k_uptime_get_32() - last_button_press_time < debounceTime) {
+  if (k_uptime_get_32() - last_button_press_time < debounceTime)
+  {
     return;
   }
   last_button_press_time = newPressTime;
 
-
-  if (!switchOn) {
+  if (!switchOn)
+  {
     printk("Pir 2 motion\r\n");
     pir2Count++;
-    pir2CountDelta++;    
+    pir2CountDelta++;
     k_work_schedule(&toggle5V_work, K_NO_WAIT);
     k_work_schedule(&toggleInterrupt_work, K_MSEC(100));
     k_work_schedule(&checkLastPirEvent_work, K_MSEC(sensorEnabledTime));
   }
 }
 
-bool init_sensors(void) {
+bool init_sensors(void)
+{
   int ret;
 #ifdef hasTubes
   ret = gpio_pin_configure_dt(&pres1Input, GPIO_INPUT);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure %s pin %d\n", ret,
            pres1Input.port->name, pres1Input.pin);
 
@@ -810,7 +958,8 @@ bool init_sensors(void) {
   }
 
   ret = gpio_pin_configure_dt(&pres2Input, GPIO_INPUT);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure %s pin %d\n", ret,
            pres2Input.port->name, pres2Input.pin);
 
@@ -819,7 +968,8 @@ bool init_sensors(void) {
 #endif
 
   ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure %s pin %d\n", ret, button.port->name,
            button.pin);
 
@@ -827,7 +977,8 @@ bool init_sensors(void) {
   }
 
   ret = gpio_pin_configure_dt(&pir, GPIO_INPUT);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure %s pin %d\n", ret, pir.port->name,
            pir.pin);
 
@@ -835,15 +986,17 @@ bool init_sensors(void) {
   }
 
   ret = gpio_pin_configure_dt(&pir2, GPIO_INPUT);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure %s pin %d\n", ret, pir.port->name,
            pir2.pin);
 
     return false;
-  }  
+  }
 
   ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            button.port->name, button.pin);
 
@@ -851,18 +1004,20 @@ bool init_sensors(void) {
   }
 
   ret = gpio_pin_interrupt_configure_dt(&pir, GPIO_INT_EDGE_TO_ACTIVE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pir.port->name, pir.pin);
     return false;
   }
 
   ret = gpio_pin_interrupt_configure_dt(&pir2, GPIO_INT_EDGE_TO_ACTIVE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pir.port->name, pir2.pin);
     return false;
-  }  
+  }
 
 #ifdef hasTubes
   gpio_init_callback(&gpio_cb1, pres1_callback, BIT(pres1Input.pin));
@@ -879,15 +1034,17 @@ bool init_sensors(void) {
   gpio_add_callback(pir.port, &gpio_cb4);
 
   gpio_init_callback(&gpio_cb5, pir2_callback, BIT(pir2.pin));
-  gpio_add_callback(pir2.port, &gpio_cb5);  
+  gpio_add_callback(pir2.port, &gpio_cb5);
 
   return true;
 }
 
-int disableInterrupts(void) {
+int disableInterrupts(void)
+{
 #ifdef hasTubes
   int ret = gpio_pin_interrupt_configure_dt(&pres1Input, GPIO_INT_DISABLE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pres1Input.port->name, pres1Input.pin);
 
@@ -895,7 +1052,8 @@ int disableInterrupts(void) {
   }
 
   ret = gpio_pin_interrupt_configure_dt(&pres2Input, GPIO_INT_DISABLE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pres2Input.port->name, pres2Input.pin);
 
@@ -906,11 +1064,13 @@ int disableInterrupts(void) {
   return 0;
 }
 
-int enableInterrupts(void) {
+int enableInterrupts(void)
+{
 #ifdef hasTubes
   int ret =
       gpio_pin_interrupt_configure_dt(&pres1Input, GPIO_INT_EDGE_TO_ACTIVE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pres1Input.port->name, pres1Input.pin);
 
@@ -918,7 +1078,8 @@ int enableInterrupts(void) {
   }
 
   ret = gpio_pin_interrupt_configure_dt(&pres2Input, GPIO_INT_EDGE_TO_ACTIVE);
-  if (ret != 0) {
+  if (ret != 0)
+  {
     printk("Error %d: failed to configure interrupt on %s pin %d\n", ret,
            pres2Input.port->name, pres2Input.pin);
 
@@ -928,23 +1089,30 @@ int enableInterrupts(void) {
   return 0;
 }
 
-void toggleInterrupts(struct k_work *work) {
-  if (interruptOn) {
+void toggleInterrupts(struct k_work *work)
+{
+  if (interruptOn)
+  {
     disableInterrupts();
     printk("Interrupts disabled\r\n");
     interruptOn = 0;
-  } else {
+  }
+  else
+  {
     enableInterrupts();
     printk("Interrupts enabled\r\n");
     interruptOn = 1;
   }
 }
 
-static void lte_handler(const struct lte_lc_evt *const evt) {
-  switch (evt->type) {
+static void lte_handler(const struct lte_lc_evt *const evt)
+{
+  switch (evt->type)
+  {
   case LTE_LC_EVT_NW_REG_STATUS:
     if ((evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME) &&
-        (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+        (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING))
+    {
       break;
     }
 
@@ -961,14 +1129,16 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
     activeTime = evt->psm_cfg.active_time;
     tauTime = evt->psm_cfg.tau;
     break;
-  case LTE_LC_EVT_EDRX_UPDATE: {
+  case LTE_LC_EVT_EDRX_UPDATE:
+  {
     char log_buf[60];
     ssize_t len;
 
     len = snprintf(log_buf, sizeof(log_buf),
                    "eDRX parameter update: eDRX: %f, PTW: %f",
                    evt->edrx_cfg.edrx, evt->edrx_cfg.ptw);
-    if (len > 0) {
+    if (len > 0)
+    {
       printk("%s\n", log_buf);
     }
     break;
@@ -986,27 +1156,34 @@ static void lte_handler(const struct lte_lc_evt *const evt) {
   }
 }
 
-static void modem_configure(void) {
+static void modem_configure(void)
+{
   int err;
 
-  if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT)) {
+  if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT))
+  {
     /* Do nothing, modem is already configured and LTE connected. */
-  } else {
+  }
+  else
+  {
     err = lte_lc_init_and_connect_async(lte_handler);
 
-    if (err) {
+    if (err)
+    {
       printk("Modem could not be configured, error: %d\n", err);
       return;
     }
   }
 }
 
-static void nrf_modem_lib_dfu_handler(void) {
+static void nrf_modem_lib_dfu_handler(void)
+{
   int err;
 
   err = modem_lib_init_result;
 
-  switch (err) {
+  switch (err)
+  {
   case NRF_MODEM_DFU_RESULT_OK:
     LOG_INF("Modem update suceeded, reboot");
     sys_reboot(SYS_REBOOT_COLD);
@@ -1031,7 +1208,8 @@ static void nrf_modem_lib_dfu_handler(void) {
   }
 }
 
-static int app_topics_subscribe(void) {
+static int app_topics_subscribe(void)
+{
   int err;
   static char settingsString[20] = "/settings";
   strcpy(topicString, imei);
@@ -1043,15 +1221,18 @@ static int app_topics_subscribe(void) {
       [0].str = topicString, [0].len = strlen(topicString)};
 
   err = aws_iot_subscription_topics_add(topics_list, ARRAY_SIZE(topics_list));
-  if (err) {
+  if (err)
+  {
     printk("aws_iot_subscription_topics_add, error: %d\n", err);
   }
 
   return err;
 }
 
-static void date_time_event_handler(const struct date_time_evt *evt) {
-  switch (evt->type) {
+static void date_time_event_handler(const struct date_time_evt *evt)
+{
+  switch (evt->type)
+  {
   case DATE_TIME_OBTAINED_MODEM:
     /* Fall through */
   case DATE_TIME_OBTAINED_NTP:
@@ -1074,18 +1255,21 @@ static void date_time_event_handler(const struct date_time_evt *evt) {
   }
 }
 
-bool init_adc() {
+bool init_adc()
+{
   int err;
 
   adc_dev = DEVICE_DT_GET(ADC_NODE);
-  if (!adc_dev) {
+  if (!adc_dev)
+  {
     printk("Error getting adc failed\n");
 
     return false;
   }
 
   err = adc_channel_setup(adc_dev, &m_1st_channel_cfg);
-  if (err) {
+  if (err)
+  {
     printk("Error in adc setup: %d\n", err);
 
     return false;
@@ -1095,7 +1279,8 @@ bool init_adc() {
 }
 
 #ifdef hasLidar
-void lidarThread(void) {
+void lidarThread(void)
+{
   uint8_t dataArray[6] = {0};
   int16_t dist = 0;
   int16_t flux = 0;
@@ -1105,40 +1290,51 @@ void lidarThread(void) {
   uint32_t lastPeopleCountTime = 0;
   k_sleep(K_MSEC(2000));
 
-  if (!device_is_ready(dev_i2c.bus)) {
+  if (!device_is_ready(dev_i2c.bus))
+  {
     printk("I2C bus %s is not ready!\n\r", dev_i2c.bus->name);
     return;
   }
 
-  while (!cloud_connected) {
+  while (!cloud_connected)
+  {
     k_sleep(K_MSEC(1000));
   }
 
   printk("Lidar thread started\n\r");
   lidarThreadOn = true;
 
-  while (1) {
-    if (switchOn) {
+  while (1)
+  {
+    if (switchOn)
+    {
       ret = i2c_burst_read_dt(&dev_i2c, TFL_DIST_LO, dataArray,
                               sizeof(dataArray));
-      if (ret != 0) {
+      if (ret != 0)
+      {
         printk("Failed to read to I2C device");
-      } else {
+      }
+      else
+      {
         dist = dataArray[0] + (dataArray[1] << 8);
         flux = dataArray[2] + (dataArray[3] << 8);
         temp = dataArray[4] + (dataArray[5] << 8);
-        if (dist == 0) {
+        if (dist == 0)
+        {
           dist = 800;
         }
 
-        tempInt = floor(temp/100);
+        tempInt = floor(temp / 100);
         lastDist = dist;
         uint32_t nowTime = k_uptime_get_32();
 
         // printk("Distance: %d\n\r",dist);
-        if (countActive == false) {
-          if (dist <= lowThreshold && dist > 5) {
-            if (nowTime - lastPeopleCountTime >= lidarInterval) {
+        if (countActive == false)
+        {
+          if (dist <= lowThreshold && dist > 5)
+          {
+            if (nowTime - lastPeopleCountTime >= lidarInterval)
+            {
               numPeople++;
               fluxInt = flux;
               numPeopleDelta++;
@@ -1146,7 +1342,8 @@ void lidarThread(void) {
                      numPeople, dist);
               countActive = true;
               lastPeopleCountTime = nowTime;
-              if (debug == true) {
+              if (debug == true)
+              {
                 printk("Sending debug info\n");
                 k_work_submit(&shadow_update_version_work);
               }
@@ -1154,8 +1351,10 @@ void lidarThread(void) {
           }
         }
 
-        if (countActive == true) {
-          if (dist > highThreshold) {
+        if (countActive == true)
+        {
+          if (dist > highThreshold)
+          {
             countActive = false;
           }
         }
@@ -1168,8 +1367,24 @@ void lidarThread(void) {
 K_THREAD_DEFINE(lidarThread_id, 1024, lidarThread, NULL, NULL, NULL, 10, 0, 0);
 #endif
 
-void toggle5V(struct k_work *work) {
-  if (switchOn) {
+void disconnectAWS(struct k_work *work)
+{
+  int err;
+  err = aws_iot_disconnect();
+  if (err)
+  {
+    printk("aws_iot_disconnect, error: %d\n", err);
+  }
+  else
+  {
+    printk("AWS IoT disconnected\n");
+  }
+}
+
+void toggle5V(struct k_work *work)
+{
+  if (switchOn)
+  {
 #ifdef hasLidar
     printk("Lidar thread suspended\r\n");
     k_thread_suspend(lidarThread_id);
@@ -1178,7 +1393,9 @@ void toggle5V(struct k_work *work) {
     turn_switch_off();
     switchOn = 0;
     printk("5 volt disabled\r\n");
-  } else {
+  }
+  else
+  {
     turn_switch_on();
     switchOn = 1;
     printk("5 volt enabled\r\n");
@@ -1188,12 +1405,14 @@ void toggle5V(struct k_work *work) {
     k_thread_resume(lidarThread_id);
 #endif
   }
-
 }
 
-static void work_init(void) {
+static void work_init(void)
+{
   k_work_init_delayable(&toggle5V_work, toggle5V);
   k_work_init_delayable(&toggleInterrupt_work, toggleInterrupts);
+  k_work_init_delayable(&disconnectAWS_work, disconnectAWS);
+
 #ifdef hasTubes
   k_work_init_delayable(&pres1_work, pres1Work);
   k_work_init_delayable(&pres2_work, pres2Work);
@@ -1204,10 +1423,12 @@ static void work_init(void) {
   k_work_init(&shadow_update_version_work, shadow_update_version_work_fn);
 }
 
-void main(void) {
+void main(void)
+{
   int err;
 
-  if (!device_is_ready(wdt)) {
+  if (!device_is_ready(wdt))
+  {
     printk("%s: device not ready.\n", wdt->name);
   }
 
@@ -1222,7 +1443,8 @@ void main(void) {
 
   wdt_channel_id = wdt_install_timeout(wdt, &wdt_config);
   err = wdt_setup(wdt, WDT_OPT_PAUSE_HALTED_BY_DBG);
-  if (err < 0) {
+  if (err < 0)
+  {
     printk("Watchdog setup error\n");
   }
 
@@ -1232,7 +1454,8 @@ void main(void) {
 
   gpio_dev = DEVICE_DT_GET(GPIO_NODE);
 
-  if (!gpio_dev) {
+  if (!gpio_dev)
+  {
     printk("Error getting GPIO device binding\r\n");
 
     return;
@@ -1241,17 +1464,16 @@ void main(void) {
   cJSON_Init();
   nrf_modem_lib_dfu_handler();
   err = modem_info_init();
-  if (err) {
+  if (err)
+  {
     printk("Failed initializing modem info module, error: %d\n", err);
   }
   modem_configure();
   modem_info_string_get(MODEM_INFO_IMEI, imei, sizeof(imei));
   modem_info_string_get(MODEM_INFO_ICCID, ccid, sizeof(ccid));
 
-
   printk("Modem IMEI: %s \n", imei);
   printk("Modem CCID: %s \n", ccid);
-
 
   const struct aws_iot_config awsConfig = {
       .client_id = imei,
@@ -1259,17 +1481,20 @@ void main(void) {
   };
 
   err = aws_iot_init(&awsConfig, aws_iot_event_handler);
-  if (err) {
+  if (err)
+  {
     printk("AWS IoT library could not be initialized, error: %d\n", err);
   }
 
   err = lte_lc_psm_req(true);
-  if (err) {
+  if (err)
+  {
     printk("Requesting PSM failed, error: %d\n", err);
-  }  
+  }
 
   err = app_topics_subscribe();
-  if (err) {
+  if (err)
+  {
     printk("Adding application specific topics failed, error: %d\n", err);
   }
 
@@ -1283,9 +1508,9 @@ void main(void) {
   init_switch();
   init_sensors();
   err = lte_lc_psm_req(true);
-  if (err) {
+  if (err)
+  {
     printk("Requesting PSM failed, error: %d\n", err);
-  }  
+  }
   k_work_schedule(&connect_work, K_NO_WAIT);
 }
-
