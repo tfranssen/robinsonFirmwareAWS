@@ -24,7 +24,7 @@
 #include <zephyr/pm/device.h>
 
 // Device specific defines
-#define hasTubes 1
+// #define hasTubes 0
 #define hasLidar 1
 // #define oldPCB 1 // Old PCB has different ADC input
 
@@ -34,8 +34,8 @@ char versionNr[10] = "v1.9";
 bool debug = false;
 int debounceTime = 500;       // in ms
 int sensorEnabledTime = 5000; // in ms
-int abInterval = 500;        // in ms
-int sendDelay = 1800;         // in seconds
+int abInterval = 1500;        // in ms
+int sendDelay = 1800;           // in seconds
 int lowThreshold = 350;       // in cm
 int highThreshold = 360;      // in cm
 int lidarInterval = 500;      // in ms
@@ -781,7 +781,10 @@ void pres1Work(struct k_work *work)
 
   pres1Count++;
   pres1CountDelta++;
-  printk("Pres 1 active. Count is %d\r\n", pres1Count);
+  if (debug)
+  {
+    printk("Pres 1 active. Count is %d\r\n", pres1Count);
+  }
 
   if (last_pres1_time - last_pres2_time < abInterval)
   {
