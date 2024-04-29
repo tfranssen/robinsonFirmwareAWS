@@ -24,7 +24,7 @@
 #include <zephyr/pm/device.h>
 
 // Device specific defines
-#define hasTubes 1
+// #define hasTubes 1
 #define hasLidar 1
 // #define oldPCB 1 // Old PCB has different ADC input
 
@@ -172,7 +172,7 @@ void icarus_uart_set_enable(bool enable)
 {
   int err;
   const struct device *uart0_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
-  const struct device *uart1_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
+  //const struct device *uart1_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
 
   if (device_is_ready(uart0_dev))
   {
@@ -187,18 +187,18 @@ void icarus_uart_set_enable(bool enable)
     }
   }
 
-  if (device_is_ready(uart1_dev))
-  {
-    err = pm_device_action_run(uart1_dev, enable ? PM_DEVICE_ACTION_RESUME : PM_DEVICE_ACTION_SUSPEND);
-    if (err)
-    {
-      printk("UART1 device action failed: %d\n", err);
-    }
-    else
-    {
-      printk("UART1 device action success\n");
-    }
-  }
+  // if (device_is_ready(uart1_dev))
+  // {
+  //   err = pm_device_action_run(uart1_dev, enable ? PM_DEVICE_ACTION_RESUME : PM_DEVICE_ACTION_SUSPEND);
+  //   if (err)
+  //   {
+  //     printk("UART1 device action failed: %d\n", err);
+  //   }
+  //   else
+  //   {
+  //     printk("UART1 device action success\n");
+  //   }
+  // }
 }
 
 #define BUFFER_SIZE 1
